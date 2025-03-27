@@ -12,15 +12,13 @@ import sys
 import tensorrt as trt
 import pycuda.driver as cuda
 import pycuda.autoinit  # Initializes CUDA driver
-
-TRT_LOGGER = trt.Logger(trt.Logger.INFO)
+from model_zoo import TRT_LOGGER
 
 def softmax(z):
     assert len(z.shape) == 2
     s = np.max(z, axis=1, keepdims=True)
     e_x = np.exp(z - s)
-    div = np.sum(e_x, axis=1, keepdims=True)
-    return e_x / div
+    return e_x / np.sum(e_x, axis=1, keepdims=True)
 
 def distance2bbox(points, distance, max_shape=None):
     x1 = points[:, 0] - distance[:, 0]
@@ -60,7 +58,7 @@ class RetinaFace:
                 assert self.model_file is not None and osp.exists(self.model_file)
                 self.session = onnxruntime.InferenceSession(self.model_file, None)
         else:
-            # Initialize using TensorRT; trt_file must be provided
+            # Use TRT mode: load TRT engine from the provided trt_file.
             assert trt_file is not None and osp.exists(trt_file), "TRT file must be provided"
             self.engine = self.load_trt_engine(trt_file)
             self.context = self.engine.create_execution_context()
@@ -77,20 +75,16 @@ class RetinaFace:
         if self.use_onnx:
             input_cfg = self.session.get_inputs()[0]
             input_shape = input_cfg.shape
-            if isinstance(input_shape[2], str):
-                self.input_size = None
-            else:
-                self.input_size = tuple(input_shape[2:4][::-1])
+            self.input_size = tuple(input_shape[2:4][::-1]) if not isinstance(input_shape[2], str) else None
             self.input_name = input_cfg.name
             outputs = self.session.get_outputs()
             self.output_names = [o.name for o in outputs]
         else:
-            # For TRT, you may define these manually or pass them as parameters.
+            # For TRT, you define input_size manually.
             self.input_size = (640, 640)
             self.input_name = "input"  # Placeholder name for reference
             # Output names not used explicitly in TRT code below.
             self.output_names = None
-            
         self.input_mean = 127.5
         self.input_std = 128.0
         self.use_kps = False
@@ -132,7 +126,7 @@ class RetinaFace:
         input_size = kwargs.get('input_size', None)
         if input_size is not None:
             if self.input_size is not None:
-                print('warning: det_size is already set in detection model, ignoring')
+                print('Warning: det_size is already set, ignoring new value.')
             else:
                 self.input_size = input_size
 
@@ -197,17 +191,15 @@ class RetinaFace:
         bboxes_list = []
         kpss_list = []
         input_size = tuple(img.shape[0:2][::-1])
-        blob = cv2.dnn.blobFromImage(
-            img, 1.0 / self.input_std, input_size,
-            (self.input_mean, self.input_mean, self.input_mean),
-            swapRB=True
-        )
+        blob = cv2.dnn.blobFromImage(img, 1.0/self.input_std, input_size,
+                                       (self.input_mean, self.input_mean, self.input_mean),
+                                       swapRB=True)
         if self.use_onnx:
             net_outs = self.session.run(self.output_names, {self.input_name: blob})
         else:
             net_outs = self.retinaface_inference_trt(blob)
         
-        # Post-process outputs (decoding, NMS, etc.)
+        # Post-process: decode outputs, apply NMS, etc.
         input_height = blob.shape[2]
         input_width = blob.shape[3]
         fmc = self.fmc
@@ -267,6 +259,8 @@ class RetinaFace:
         bboxes = np.vstack(bboxes_list) / det_scale
         if self.use_kps:
             kpss = np.vstack(kpss_list) / det_scale
+        else:
+            kpss = None
         pre_det = np.hstack((bboxes, scores)).astype(np.float32, copy=False)
         pre_det = pre_det[order, :]
         keep = self.nms(pre_det)
