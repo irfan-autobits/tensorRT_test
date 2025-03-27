@@ -48,26 +48,25 @@ def distance2kps(points, distance, max_shape=None):
     return np.stack(preds, axis=-1)
 
 class RetinaFace:
-    def __init__(self, model_file=None, session=None, use_onnx=False, trt_file=None):
+    def __init__(self, model_file=None, session=None, use_onnx=True, trt_file=None):
         self.model_file = model_file
-        self.trt_file = trt_file
         self.session = session
         self.taskname = 'detection'
         self.use_onnx = use_onnx
-        
-        if self.session is None:
-            if use_onnx:
-                # Using ONNX Runtime
+
+        if self.use_onnx:
+            # Initialize using ONNX Runtime
+            if self.session is None:
                 assert self.model_file is not None and osp.exists(self.model_file)
                 self.session = onnxruntime.InferenceSession(self.model_file, None)
-            else:
-                # Using TensorRT
-                # Load the TRT engine and create a persistent execution context
-                self.engine = self.load_trt_engine(self.trt_file)
-                self.context = self.engine.create_execution_context()
-                # Allocate buffers once for inference reuse
-                self.inputs, self.outputs, self.bindings, self.stream = self.allocate_buffers(self.engine)
-                
+        else:
+            # Initialize using TensorRT; trt_file must be provided
+            assert trt_file is not None and osp.exists(trt_file), "TRT file must be provided"
+            self.engine = self.load_trt_engine(trt_file)
+            self.context = self.engine.create_execution_context()
+            # Allocate buffers once for inference reuse
+            self.inputs, self.outputs, self.bindings, self.stream = self.allocate_buffers(self.engine)
+
         self.center_cache = {}
         self.nms_thresh = 0.4
         self.det_thresh = 0.5
@@ -86,8 +85,7 @@ class RetinaFace:
             outputs = self.session.get_outputs()
             self.output_names = [o.name for o in outputs]
         else:
-            # When using TRT, assume the input shape is known/fixed.
-            # You might hardcode or pass it as a parameter.
+            # For TRT, you may define these manually or pass them as parameters.
             self.input_size = (640, 640)
             self.input_name = "input"  # Placeholder name for reference
             # Output names not used explicitly in TRT code below.
@@ -209,15 +207,15 @@ class RetinaFace:
         else:
             net_outs = self.retinaface_inference_trt(blob)
         
+        # Post-process outputs (decoding, NMS, etc.)
         input_height = blob.shape[2]
         input_width = blob.shape[3]
         fmc = self.fmc
         for idx, stride in enumerate(self._feat_stride_fpn):
             scores = net_outs[idx]
-            bbox_preds = net_outs[idx + fmc]
-            bbox_preds = bbox_preds * stride
+            bbox_preds = net_outs[idx + fmc] * stride
             if self.use_kps:
-                kps_preds = net_outs[idx + fmc * 2] * stride
+                kps_preds = net_outs[idx + fmc*2] * stride
             height = input_height // stride
             width = input_width // stride
             key = (height, width, stride)
@@ -228,7 +226,7 @@ class RetinaFace:
                 anchor_centers = np.stack(np.mgrid[:height, :width][::-1], axis=-1).astype(np.float32)
                 anchor_centers = (anchor_centers * stride).reshape((-1, 2))
                 if self._num_anchors > 1:
-                    anchor_centers = np.stack([anchor_centers] * self._num_anchors, axis=1).reshape((-1, 2))
+                    anchor_centers = np.stack([anchor_centers]*self._num_anchors, axis=1).reshape((-1, 2))
                 if len(self.center_cache) < 100:
                     self.center_cache[key] = anchor_centers
 
@@ -274,8 +272,7 @@ class RetinaFace:
         keep = self.nms(pre_det)
         det = pre_det[keep, :]
         if self.use_kps:
-            kpss = kpss[order, :, :]
-            kpss = kpss[keep, :, :]
+            kpss = np.vstack(kpss_list)[order, :, :][keep, :, :]
         else:
             kpss = None
 
